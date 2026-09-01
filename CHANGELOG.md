@@ -1,3 +1,10 @@
+0.2.0
+
+  Fix UTF-8 store
+  Fetch on toggle
+  Queue calendar commands
+  Add rename color
+
 0.1.0
 
   Add Almanac Calendar
