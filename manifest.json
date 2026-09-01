@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "sd.calendar",
+  "name": "Almanac Calendar",
+  "version": "0.1.0",
+  "author": "sd",
+  "license": "MIT",
+  "description": "Almanac Calendar. Day, week, month, year. Local events plus ICS feeds. Search almanac or calendar.",
+  "kinds": [
+    "bar-widget",
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "panel": "window/CalendarApp.qml"
+  },
+  "barWidget": {
+    "displayName": "Almanac Calendar",
+    "description": "Open Almanac Calendar from the bar",
+    "category": "Time",
+    "aliases": [
+      "almanac",
+      "calendar",
+      "agenda"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

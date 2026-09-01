@@ -1,0 +1,910 @@
+import QtQuick
+import Quickshell
+import Quickshell.Io
+import qs.Commons
+import qs.Ui
+import "Model.js" as Model
+
+// Month grid + subscribed calendars. Chips in cells like macOS Calendar.
+Item {
+  id: root
+  focus: true
+
+  property var bar: null
+  signal closeRequested()
+
+  property date today: new Date()
+  readonly property string todayKey: Model.keyForDate(today)
+  property string selectedKey: todayKey
+  property int viewYear: today.getFullYear()
+  property int viewMonth: today.getMonth()
+  property bool live: true
+  property string viewMode: "month"
+  readonly property var viewModes: [
+    { id: "day", label: "Day" },
+    { id: "week", label: "Week" },
+    { id: "month", label: "Month" },
+    { id: "year", label: "Year" }
+  ]
+
+  readonly property date viewDate: new Date(viewYear, viewMonth, 1)
+  readonly property bool viewingCurrentMonth: viewYear === today.getFullYear() && viewMonth === today.getMonth()
+  readonly property var weekDays: viewMode === "week" ? Model.weekDaysFromKey(selectedKey, weekStart, todayKey) : []
+  readonly property var yearMonths: viewMode === "year" ? Model.yearMonths(viewYear, weekStart, todayKey) : []
+  readonly property string headerTitle: {
+    if (viewMode === "day") {
+      var parsed = Model.parseDateKey(selectedKey)
+      if (!parsed) return ""
+      return Qt.formatDate(new Date(parsed.year, parsed.month, parsed.day), "dddd, MMMM d, yyyy")
+    }
+    if (viewMode === "week") return Model.formatWeekTitle(weekDays)
+    if (viewMode === "year") return String(viewYear)
+    return Qt.formatDate(viewDate, "MMMM yyyy")
+  }
+  readonly property bool viewingToday: {
+    if (viewMode === "day") return selectedKey === todayKey
+    if (viewMode === "week") {
+      for (var i = 0; i < weekDays.length; i++) if (weekDays[i].key === todayKey) return true
+      return false
+    }
+    if (viewMode === "year") return viewYear === today.getFullYear()
+    return viewingCurrentMonth
+  }
+  readonly property string stepLabel: viewMode === "day" ? "day" : viewMode === "week" ? "week" : viewMode === "year" ? "year" : "month"
+  readonly property real yearDone: Model.yearProgress(today.getFullYear(), today.getMonth(), today.getDate())
+  readonly property int yearDonePercent: Model.yearProgressPercent(today.getFullYear(), today.getMonth(), today.getDate())
+  readonly property int weekStart: Model.normalizedWeekStart(null, Qt.locale().firstDayOfWeek)
+  readonly property var weekdays: Model.weekdayOrder(weekStart)
+  readonly property string selectedLabel: Model.formatSelectedDateLabel(selectedKey, todayKey)
+  property var eventsByDate: ({})
+  property var calendars: []
+  readonly property var selectedEvents: Model.eventsForDay(eventsByDate, selectedKey)
+  readonly property string eventsPath: (Quickshell.env("XDG_STATE_HOME") || ((Quickshell.env("HOME") || "") + "/.local/state")) + "/omarchy/sd-calendar.json"
+  readonly property string pluginDir: {
+    var url = String(Qt.resolvedUrl("."))
+    if (url.indexOf("file://") === 0) url = url.slice(7)
+    if (url.length > 1 && url.charAt(url.length - 1) === "/") url = url.slice(0, -1)
+    return url
+  }
+  readonly property string calendarBin: pluginDir + "/bin/sd-calendar"
+
+  readonly property color contentForeground: bar ? bar.foreground : Color.foreground
+  readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property var labelLocale: Qt.locale("en_US")
+
+  readonly property int sidebarWidth: Style.space(220)
+  readonly property int cellSpacing: Style.space(6)
+  readonly property int weekColumnWidth: Style.space(36)
+  readonly property int gutterWidth: Style.space(20)
+  readonly property int headerHeight: Style.space(32)
+
+  property bool busy: false
+  property bool addingCalendar: false
+  property var detailCalendar: null
+  property string statusText: ""
+
+  function refresh() {
+    var now = new Date()
+    if (Model.keyForDate(now) !== todayKey) today = now
+  }
+
+  function goToToday() {
+    viewYear = today.getFullYear()
+    viewMonth = today.getMonth()
+    selectedKey = todayKey
+  }
+
+  function moveMonth(delta) {
+    var next = Model.stepMonth(viewYear, viewMonth, delta)
+    viewYear = next.year
+    viewMonth = next.month
+  }
+
+  function moveYear(delta) {
+    viewYear += delta
+  }
+
+  function moveStep(delta) {
+    if (viewMode === "month") {
+      moveMonth(delta)
+      return
+    }
+    if (viewMode === "year") {
+      moveYear(delta)
+      return
+    }
+    var next = Model.addDaysFromKey(selectedKey, viewMode === "week" ? delta * 7 : delta)
+    if (!next) return
+    selectedKey = next.key
+    viewYear = next.year
+    viewMonth = next.month
+  }
+
+  function selectDay(day) {
+    if (!day || !day.key) return
+    selectedKey = day.key
+    if (day.year !== viewYear || day.month !== viewMonth) {
+      viewYear = day.year
+      viewMonth = day.month
+    }
+  }
+
+  function applyEvents(text) {
+    var parsed = Model.parseEventsFile(text)
+    eventsByDate = parsed.eventsByDate
+    calendars = parsed.calendars
+    if (detailCalendar && detailCalendar.id) {
+      var id = detailCalendar.id
+      var next = null
+      for (var i = 0; i < calendars.length; i++) {
+        if (calendars[i] && calendars[i].id === id) {
+          next = calendars[i]
+          break
+        }
+      }
+      detailCalendar = next
+    }
+  }
+
+  onLiveChanged: if (live) eventsFile.reload()
+
+  readonly property var weekdayLabels: {
+    var out = []
+    for (var i = 0; i < weekdays.length; i++)
+      out.push(String(labelLocale.dayName(weekdays[i], Locale.ShortFormat)).toUpperCase())
+    return out
+  }
+
+  function weekdayLabel(weekday) {
+    var i = weekdays.indexOf(weekday)
+    return i >= 0 ? weekdayLabels[i] : String(labelLocale.dayName(weekday, Locale.ShortFormat)).toUpperCase()
+  }
+
+  function cellForeground(day) {
+    if (day.today || day.key === selectedKey) return contentForeground
+    if (!day.inMonth) return Qt.darker(contentForeground, 2.2)
+    if (day.weekend) return Qt.darker(contentForeground, 1.45)
+    return contentForeground
+  }
+
+  function eventColor(event) {
+    if (event && event.color) return event.color
+    return Style.selectedStateColor(contentForeground, Color.accent)
+  }
+
+  function chipLabel(event) {
+    if (!event) return ""
+    if (event.allDay || !event.start) return event.title
+    return event.start + "  " + event.title
+  }
+
+  function dayEvents(key) {
+    return Model.eventsForDay(eventsByDate, key)
+  }
+
+  function runCal(args) {
+    if (root.busy) return
+    root.busy = true
+    root.statusText = ""
+    calProc.command = [root.calendarBin].concat(args)
+    calProc.running = true
+  }
+
+  function openAddForm() {
+    root.addingCalendar = true
+    root.statusText = ""
+    Qt.callLater(function () { urlField.forceActiveFocus() })
+  }
+
+  function closeAddForm() {
+    root.addingCalendar = false
+    nameField.text = ""
+    urlField.text = ""
+    root.statusText = ""
+  }
+
+  function subscribeFromFields() {
+    var url = String(urlField.text || "").replace(/^\s+|\s+$/g, "")
+    var name = String(nameField.text || "").replace(/^\s+|\s+$/g, "")
+    if (!url) {
+      root.statusText = "Paste an ICS URL"
+      return
+    }
+    if (!name) name = url.indexOf("almanac") !== -1 ? "Almanac" : "Calendar"
+    root.runCal(["subscribe", name, url])
+  }
+
+  Keys.onPressed: function (event) {
+    if (event.key === Qt.Key_Escape) {
+      if (root.detailCalendar) root.detailCalendar = null
+      else if (root.addingCalendar) root.closeAddForm()
+      else root.closeRequested()
+      event.accepted = true
+    } else if (event.key === Qt.Key_Left || event.text === "[") {
+      root.moveStep(-1)
+      event.accepted = true
+    } else if (event.key === Qt.Key_Right || event.text === "]") {
+      root.moveStep(1)
+      event.accepted = true
+    } else if (event.key === Qt.Key_Up || event.text === "{") {
+      root.moveYear(-1)
+      event.accepted = true
+    } else if (event.key === Qt.Key_Down || event.text === "}") {
+      root.moveYear(1)
+      event.accepted = true
+    } else if (event.text === "1") {
+      root.viewMode = "day"
+      event.accepted = true
+    } else if (event.text === "2") {
+      root.viewMode = "week"
+      event.accepted = true
+    } else if (event.text === "3") {
+      root.viewMode = "month"
+      event.accepted = true
+    } else if (event.text === "4") {
+      root.viewMode = "year"
+      event.accepted = true
+    } else if (event.key === Qt.Key_T || event.text === "t" || event.text === "T") {
+      root.goToToday()
+      event.accepted = true
+    } else if (event.key === Qt.Key_R && (event.modifiers & Qt.ControlModifier)) {
+      root.runCal(["sync"])
+      event.accepted = true
+    }
+  }
+
+  FileView {
+    id: eventsFile
+    path: root.eventsPath
+    watchChanges: root.live
+    atomicWrites: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.applyEvents(text())
+    onLoadFailed: root.applyEvents("")
+  }
+
+  Process {
+    id: calProc
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var err = String(text || "").replace(/^\s+|\s+$/g, "")
+        if (err) root.statusText = err.replace(/^sd-calendar:\s*/, "")
+      }
+    }
+    onExited: function (code) {
+      root.busy = false
+      if (code === 0) {
+        if (root.addingCalendar) root.closeAddForm()
+        else if (!root.statusText) root.statusText = "Synced"
+      }
+      eventsFile.reload()
+    }
+  }
+
+  Timer {
+    interval: 30000
+    running: root.live
+    repeat: true
+    onTriggered: {
+      var now = new Date()
+      if (Model.keyForDate(now) === String(root.todayKey)) return
+      var followToday = root.viewingCurrentMonth && root.selectedKey === root.todayKey
+      root.today = now
+      if (followToday) root.goToToday()
+    }
+  }
+
+  Item {
+    id: sidebar
+    anchors.left: parent.left
+    anchors.top: parent.top
+    anchors.bottom: parent.bottom
+    width: root.sidebarWidth
+
+    Item {
+      id: sideHeadingRow
+      anchors.top: parent.top
+      anchors.left: parent.left
+      anchors.right: parent.right
+      height: headerActions.height
+
+      Text {
+        id: sideHeading
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        text: "CALENDARS"
+        color: Qt.darker(root.contentForeground, 1.5)
+        font.family: root.contentFontFamily
+        font.pixelSize: Style.font.caption
+        font.letterSpacing: 1.6
+      }
+
+      Text {
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.busy ? "Syncing…" : "Sync"
+      color: syncMouse.containsMouse
+        ? Style.hoverStateColor(root.contentForeground, Color.accent)
+        : Qt.darker(root.contentForeground, 1.45)
+      font.family: root.contentFontFamily
+      font.pixelSize: Style.font.caption
+      font.letterSpacing: 0.6
+      font.bold: true
+
+        MouseArea {
+          id: syncMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.runCal(["sync"])
+        }
+      }
+    }
+
+    Column {
+      id: calendarList
+      anchors.top: sideHeadingRow.bottom
+      anchors.topMargin: Style.space(14)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      spacing: Style.space(4)
+
+      Repeater {
+        model: root.calendars
+
+        Item {
+          required property var modelData
+          width: calendarList.width
+          height: Style.space(28)
+
+          Rectangle {
+            anchors.fill: parent
+            radius: 0
+            color: calMouse.containsMouse
+              ? Style.hoverFillFor(root.contentForeground, Color.accent)
+              : "transparent"
+          }
+
+          Rectangle {
+            id: calDot
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(8)
+            height: Style.space(8)
+            radius: width / 2
+            color: modelData.color || Style.selectedStateColor(root.contentForeground, Color.accent)
+            opacity: modelData.enabled === false ? 0.35 : 1
+          }
+
+          Text {
+            anchors.left: calDot.right
+            anchors.leftMargin: Style.space(10)
+            anchors.right: infoGlyph.left
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            text: modelData.name || modelData.id
+            elide: Text.ElideRight
+            color: root.contentForeground
+            opacity: modelData.enabled === false ? 0.4 : 1
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Text {
+            id: infoGlyph
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(2)
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(18)
+            height: Style.space(18)
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            text: "󰋽"
+            color: infoMouse.containsMouse
+              ? root.contentForeground
+              : Qt.darker(root.contentForeground, 1.55)
+            opacity: modelData.enabled === false ? 0.45 : 1
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.icon
+
+            MouseArea {
+              id: infoMouse
+              anchors.fill: parent
+              anchors.margins: -Style.space(4)
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.detailCalendar = modelData
+            }
+          }
+
+          MouseArea {
+            id: calMouse
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.right: infoGlyph.left
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.runCal(["toggle", modelData.id])
+          }
+        }
+      }
+
+      Text {
+        visible: root.calendars.length === 0
+        text: "Local only"
+        color: Qt.darker(root.contentForeground, 1.85)
+        font.family: root.contentFontFamily
+        font.pixelSize: Style.font.caption
+      }
+    }
+
+    Column {
+      anchors.top: calendarList.bottom
+      anchors.topMargin: Style.space(8)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      spacing: Style.space(8)
+
+      Item {
+        width: parent.width
+        height: Style.space(28)
+
+        Rectangle {
+          anchors.fill: parent
+          color: addMouse.containsMouse || root.addingCalendar
+            ? Style.hoverFillFor(root.contentForeground, Color.accent)
+            : "transparent"
+        }
+
+        Text {
+          anchors.left: parent.left
+          anchors.leftMargin: Style.space(6)
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.addingCalendar ? "−  Cancel" : "+  Add Calendar"
+          color: addMouse.containsMouse || root.addingCalendar
+            ? root.contentForeground
+            : Qt.darker(root.contentForeground, 1.45)
+          font.family: root.contentFontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        MouseArea {
+          id: addMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.addingCalendar ? root.closeAddForm() : root.openAddForm()
+        }
+      }
+
+      Column {
+        width: parent.width
+        spacing: Style.space(8)
+        visible: root.addingCalendar
+        height: visible ? implicitHeight : 0
+
+        Rectangle {
+          width: parent.width
+          height: Style.space(32)
+          color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
+
+          TextInput {
+            id: nameField
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(10)
+            anchors.rightMargin: Style.space(10)
+            verticalAlignment: TextInput.AlignVCenter
+            color: root.contentForeground
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
+            clip: true
+            selectByMouse: true
+            Keys.onPressed: function (event) {
+              if (event.key === Qt.Key_Escape) {
+                root.closeAddForm()
+                event.accepted = true
+              }
+            }
+          }
+
+          Text {
+            anchors.fill: nameField
+            verticalAlignment: Text.AlignVCenter
+            text: "Name"
+            visible: nameField.text === "" && !nameField.activeFocus
+            color: Qt.darker(root.contentForeground, 2.0)
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        Rectangle {
+          width: parent.width
+          height: Style.space(32)
+          color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
+
+          TextInput {
+            id: urlField
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(10)
+            anchors.rightMargin: Style.space(10)
+            verticalAlignment: TextInput.AlignVCenter
+            color: root.contentForeground
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
+            clip: true
+            selectByMouse: true
+            onAccepted: root.subscribeFromFields()
+            Keys.onPressed: function (event) {
+              if (event.key === Qt.Key_Escape) {
+                root.closeAddForm()
+                event.accepted = true
+              }
+            }
+          }
+
+          Text {
+            anchors.fill: urlField
+            verticalAlignment: Text.AlignVCenter
+            text: "ICS URL"
+            visible: urlField.text === "" && !urlField.activeFocus
+            color: Qt.darker(root.contentForeground, 2.0)
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        Text {
+          text: root.busy ? "Adding…" : "Subscribe"
+          color: subscribeMouse.containsMouse
+            ? Style.hoverStateColor(root.contentForeground, Color.accent)
+            : root.contentForeground
+          font.family: root.contentFontFamily
+          font.pixelSize: Style.font.body
+          font.bold: true
+          leftPadding: Style.space(6)
+          topPadding: Style.space(4)
+          bottomPadding: Style.space(4)
+
+          MouseArea {
+            id: subscribeMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.subscribeFromFields()
+          }
+        }
+      }
+
+      Text {
+        width: sidebar.width
+        visible: root.statusText !== ""
+        text: root.statusText
+        wrapMode: Text.Wrap
+        color: Qt.darker(root.contentForeground, 1.45)
+        font.family: root.contentFontFamily
+        font.pixelSize: Style.font.caption
+      }
+    }
+  }
+
+  Item {
+    id: main
+    anchors.left: sidebar.right
+    anchors.leftMargin: Style.space(32)
+    anchors.right: parent.right
+    anchors.top: parent.top
+    anchors.bottom: parent.bottom
+
+    Item {
+      id: header
+      anchors.top: parent.top
+      anchors.left: parent.left
+      anchors.right: parent.right
+      height: monthRow.height + Style.space(22) + yearBlock.height
+
+      Item {
+        id: monthRow
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: headerActions.height + Style.space(14) + monthTitle.height
+
+        Item {
+          id: headerActions
+          anchors.top: parent.top
+          anchors.left: parent.left
+          anchors.right: parent.right
+          height: Style.space(36)
+
+          Row {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 0
+
+            Repeater {
+              model: root.viewModes
+
+              Text {
+                required property var modelData
+                anchors.verticalCenter: parent.verticalCenter
+                text: modelData.label
+                color: root.viewMode === modelData.id
+                  ? root.contentForeground
+                  : (modeMouse.containsMouse
+                    ? Style.hoverStateColor(root.contentForeground, Color.accent)
+                    : Qt.darker(root.contentForeground, 1.45))
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.body
+                font.bold: root.viewMode === modelData.id
+                leftPadding: Style.space(10)
+                rightPadding: Style.space(10)
+                topPadding: Style.space(6)
+                bottomPadding: Style.space(6)
+
+                Rectangle {
+                  anchors.fill: parent
+                  z: -1
+                  color: root.viewMode === modelData.id
+                    ? Style.hoverFillFor(root.contentForeground, Color.accent)
+                    : "transparent"
+                }
+
+                MouseArea {
+                  id: modeMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.viewMode = modelData.id
+                }
+              }
+            }
+          }
+
+          Row {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(4)
+
+            PanelActionButton {
+              iconText: "󰅁"
+              tooltipText: "Previous " + root.stepLabel
+              foreground: root.contentForeground
+              fontFamily: root.contentFontFamily
+              onClicked: root.moveStep(-1)
+            }
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Today"
+              color: todayMouse.containsMouse
+                ? Style.hoverStateColor(root.contentForeground, Color.accent)
+                : (root.viewingToday ? root.contentForeground : Qt.darker(root.contentForeground, 1.35))
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
+              leftPadding: Style.space(8)
+              rightPadding: Style.space(8)
+              topPadding: Style.space(4)
+              bottomPadding: Style.space(4)
+
+              MouseArea {
+                id: todayMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.goToToday()
+              }
+            }
+
+            PanelActionButton {
+              iconText: "󰅂"
+              tooltipText: "Next " + root.stepLabel
+              foreground: root.contentForeground
+              fontFamily: root.contentFontFamily
+              onClicked: root.moveStep(1)
+            }
+          }
+        }
+
+        Text {
+          id: monthTitle
+          anchors.top: headerActions.bottom
+          anchors.topMargin: Style.space(14)
+          anchors.left: parent.left
+          anchors.right: parent.right
+          text: root.headerTitle
+          wrapMode: Text.WordWrap
+          maximumLineCount: 2
+          color: root.contentForeground
+          font.family: root.contentFontFamily
+          font.pixelSize: 42
+          font.bold: true
+        }
+      }
+
+      Item {
+        id: yearBlock
+        anchors.top: monthRow.bottom
+        anchors.topMargin: Style.space(22)
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: Math.max(yearLabel.implicitHeight, Style.space(10))
+
+        Text {
+          id: yearLabel
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.today.getFullYear()
+          color: Qt.darker(root.contentForeground, 1.55)
+          font.family: root.contentFontFamily
+          font.pixelSize: Style.font.caption
+          font.letterSpacing: 1.4
+        }
+
+        Text {
+          id: yearPercent
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.yearDonePercent + "%"
+          color: Qt.darker(root.contentForeground, 1.35)
+          font.family: root.contentFontFamily
+          font.pixelSize: Style.font.caption
+          font.letterSpacing: 0.8
+        }
+
+        Rectangle {
+          anchors.left: yearLabel.right
+          anchors.right: yearPercent.left
+          anchors.leftMargin: Style.space(14)
+          anchors.rightMargin: Style.space(14)
+          anchors.verticalCenter: parent.verticalCenter
+          height: Style.space(4)
+          radius: 0
+          color: Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.10)
+
+          Rectangle {
+            width: Math.round(parent.width * root.yearDone)
+            height: parent.height
+            radius: parent.radius
+            color: Style.selectedStateColor(root.contentForeground, Color.accent)
+          }
+        }
+      }
+    }
+
+    Item {
+      id: dayPane
+      visible: root.viewMode === "month"
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: visible ? Math.max(Style.space(180), Math.round(root.height * 0.24)) : 0
+
+      Rectangle {
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: Style.spacing.hairline
+        color: root.contentForeground
+        opacity: 0.10
+      }
+
+      Text {
+        id: dayHeading
+        anchors.top: parent.top
+        anchors.topMargin: Style.space(20)
+        anchors.left: parent.left
+        text: root.selectedLabel.toUpperCase()
+        color: Qt.darker(root.contentForeground, 1.5)
+        font.family: root.contentFontFamily
+        font.pixelSize: Style.font.caption
+        font.letterSpacing: 1.6
+      }
+
+      ListView {
+        anchors.top: dayHeading.bottom
+        anchors.topMargin: Style.space(14)
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        clip: true
+        model: root.viewMode === "month" ? root.selectedEvents : []
+        spacing: Style.space(6)
+
+        delegate: Item {
+          width: ListView.view.width
+          height: Style.space(44)
+
+          Rectangle {
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: Style.space(3)
+            radius: 0
+            color: root.eventColor(modelData)
+          }
+
+          Text {
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(16)
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(64)
+            text: modelData.allDay || !modelData.start ? "All day" : modelData.start
+            color: Qt.darker(root.contentForeground, 1.45)
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Text {
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(88)
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: modelData.title
+            elide: Text.ElideRight
+            color: root.contentForeground
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.body
+          }
+        }
+
+        Text {
+          visible: root.selectedEvents.length === 0
+          anchors.top: parent.top
+          anchors.left: parent.left
+          text: "Nothing scheduled"
+          color: Qt.darker(root.contentForeground, 1.85)
+          font.family: root.contentFontFamily
+          font.pixelSize: Style.font.body
+        }
+      }
+    }
+
+    Item {
+      id: bodyHost
+      anchors.top: header.bottom
+      anchors.topMargin: Style.space(28)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: dayPane.visible ? dayPane.top : parent.bottom
+      anchors.bottomMargin: Style.space(20)
+
+      WheelHandler {
+        enabled: root.viewMode === "month" || root.viewMode === "year"
+        onWheel: function (event) {
+          if (event.angleDelta.y === 0) return
+          root.moveStep(event.angleDelta.y > 0 ? -1 : 1)
+        }
+      }
+
+      Loader {
+        id: modeLoader
+        anchors.fill: parent
+        active: root.live
+        sourceComponent: {
+          if (root.viewMode === "day") return dayComp
+          if (root.viewMode === "week") return weekComp
+          if (root.viewMode === "year") return yearComp
+          return monthComp
+        }
+      }
+    }
+  }
+
+  Component { id: dayComp; DayView { host: root } }
+  Component { id: weekComp; WeekView { host: root } }
+  Component { id: monthComp; MonthView { host: root } }
+  Component { id: yearComp; YearView { host: root } }
+
+  CalendarDetail {
+    anchors.fill: parent
+    host: root
+    calendar: root.detailCalendar
+  }
+}
