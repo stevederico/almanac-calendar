@@ -24,6 +24,8 @@ fn main() -> ExitCode {
         "unsubscribe" => cmd_unsubscribe(rest.first().cloned()),
         "calendars" => cmd_calendars(),
         "toggle" => cmd_toggle(rest.first().cloned()),
+        "rename" => cmd_rename(rest),
+        "color" => cmd_color(rest),
         "sync" => cmd_sync(),
         "help" | "-h" | "--help" => {
             print_help();
@@ -54,6 +56,8 @@ sd-calendar — local events + ICS subscribe, std only
   subscribe <name> <url> [color]
   unsubscribe <id>
   toggle <id>                  show or hide a calendar
+  rename <id> <name>
+  color <id> <#hex>
   sync                         refresh subscribed ICS feeds
 
 date is YYYY-MM-DD. webcal:// URLs are fetched as https://"
@@ -214,18 +218,82 @@ fn cmd_unsubscribe(id: Option<String>) -> Result<(), String> {
     save_store(&store)
 }
 
-fn cmd_toggle(id: Option<String>) -> Result<(), String> {
-    let id = id.ok_or_else(|| "usage: toggle <id>".to_string())?;
+fn cmd_rename(args: Vec<String>) -> Result<(), String> {
+    if args.len() < 2 {
+        return Err("usage: rename <id> <name>".into());
+    }
+    let id = args[0].clone();
+    let name = args[1..].join(" ");
+    if name.trim().is_empty() {
+        return Err("name required".into());
+    }
     let mut store = load_store()?;
     let cal = store
         .calendars
         .iter_mut()
         .find(|c| c.id == id)
         .ok_or_else(|| format!("no calendar {id}"))?;
-    cal.enabled = !cal.enabled;
-    let state = if cal.enabled { "on" } else { "off" };
+    cal.name = name.trim().to_string();
     save_store(&store)?;
-    writeln!(io::stdout(), "{id} {state}").map_err(io_err)
+    writeln!(io::stdout(), "{id} renamed").map_err(io_err)
+}
+
+fn cmd_color(args: Vec<String>) -> Result<(), String> {
+    if args.len() < 2 {
+        return Err("usage: color <id> <#hex>".into());
+    }
+    let id = args[0].clone();
+    let color = args[1].trim().to_string();
+    if !valid_color(&color) {
+        return Err("color must be #rgb or #rrggbb".into());
+    }
+    let mut store = load_store()?;
+    let cal = store
+        .calendars
+        .iter_mut()
+        .find(|c| c.id == id)
+        .ok_or_else(|| format!("no calendar {id}"))?;
+    cal.color = color.clone();
+    for event in &mut store.events {
+        if event.calendar_id == id {
+            event.color = color.clone();
+        }
+    }
+    save_store(&store)?;
+    writeln!(io::stdout(), "{id} {color}").map_err(io_err)
+}
+
+fn valid_color(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.first() != Some(&b'#') {
+        return false;
+    }
+    let digits = &b[1..];
+    (digits.len() == 3 || digits.len() == 6) && digits.iter().all(|c| c.is_ascii_hexdigit())
+}
+
+fn cmd_toggle(id: Option<String>) -> Result<(), String> {
+    let id = id.ok_or_else(|| "usage: toggle <id>".to_string())?;
+    let mut store = load_store()?;
+    let (enabled, has_url) = {
+        let cal = store
+            .calendars
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| format!("no calendar {id}"))?;
+        cal.enabled = !cal.enabled;
+        (cal.enabled, !cal.url.is_empty())
+    };
+    let mut extra = String::new();
+    if enabled && has_url {
+        match sync_one(&mut store, &id) {
+            Ok(n) => extra = format!("  synced {n} events"),
+            Err(err) => extra = format!("  sync failed: {err}"),
+        }
+    }
+    save_store(&store)?;
+    let state = if enabled { "on" } else { "off" };
+    writeln!(io::stdout(), "{id} {state}{extra}").map_err(io_err)
 }
 
 fn cmd_sync() -> Result<(), String> {

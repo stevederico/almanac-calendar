@@ -17,7 +17,27 @@ Item {
   z: 40
 
   function close() {
+    saveName()
+    dismiss()
+  }
+
+  function dismiss() {
     if (host) host.detailCalendar = null
+  }
+
+  function saveName() {
+    if (!host || !calendar || !nameField) return
+    var name = String(nameField.text || "").replace(/^\s+|\s+$/g, "")
+    if (!name || name === calendar.name) return
+    host.runCal(["rename", calendar.id, name])
+  }
+
+  onCalendarChanged: fillName()
+  onVisibleChanged: if (visible) fillName()
+
+  function fillName() {
+    if (nameField && calendar)
+      nameField.text = calendar.name || calendar.id || ""
   }
 
   Rectangle {
@@ -34,7 +54,8 @@ Item {
     id: card
     anchors.centerIn: parent
     width: Math.min(Style.space(420), parent.width - Style.space(72))
-    height: cardCol.implicitHeight + Style.space(40)
+    implicitHeight: cardCol.implicitHeight + Style.space(40)
+    height: implicitHeight
     color: Color.background
     border.width: Style.spacing.hairline
     border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.18)
@@ -53,27 +74,87 @@ Item {
       anchors.topMargin: Style.space(20)
       spacing: Style.space(14)
 
-      Row {
-        width: parent.width
-        spacing: Style.space(12)
+      Text {
+        text: root.calendar ? (root.calendar.name || root.calendar.id) : ""
+        color: root.fg
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.heading
+        font.bold: true
+      }
 
-        Rectangle {
-          anchors.verticalCenter: parent.verticalCenter
-          width: Style.space(12)
-          height: Style.space(12)
-          color: root.calendar && root.calendar.color
-            ? root.calendar.color
-            : Style.selectedStateColor(root.fg, Color.accent)
-        }
+      Column {
+        width: parent.width
+        spacing: Style.space(6)
 
         Text {
-          width: parent.width - Style.space(24)
-          text: root.calendar ? (root.calendar.name || root.calendar.id) : ""
-          wrapMode: Text.WordWrap
-          color: root.fg
+          text: "NAME"
+          color: Qt.darker(root.fg, 1.5)
           font.family: root.fontFamily
-          font.pixelSize: Style.font.heading
-          font.bold: true
+          font.pixelSize: Style.font.caption
+          font.letterSpacing: 1.4
+        }
+
+        Rectangle {
+          width: parent.width
+          height: Style.space(36)
+          color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08)
+
+          TextInput {
+            id: nameField
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(10)
+            anchors.rightMargin: Style.space(10)
+            verticalAlignment: TextInput.AlignVCenter
+            color: root.fg
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            selectByMouse: true
+            clip: true
+            onAccepted: root.saveName()
+          }
+        }
+      }
+
+      Column {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          text: "COLOR"
+          color: Qt.darker(root.fg, 1.5)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.letterSpacing: 1.4
+        }
+
+        Row {
+          spacing: Style.space(8)
+
+          Repeater {
+            model: [
+              "#5b9fd4", "#e07a5f", "#81b29a", "#f2cc8f", "#9b8ec4",
+              "#e9c46a", "#c4a574", "#d67b7b", "#6bb3b3", "#c47ba0"
+            ]
+
+            Rectangle {
+              required property var modelData
+              width: Style.space(18)
+              height: Style.space(18)
+              color: modelData
+              border.width: root.calendar && root.calendar.color === modelData ? 2 : 0
+              border.color: root.fg
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: false
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  if (root.host && root.calendar)
+                    root.host.runCal(["color", root.calendar.id, modelData])
+                }
+              }
+            }
+          }
         }
       }
 
@@ -159,9 +240,10 @@ Item {
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onClicked: {
-              if (!root.host || !root.calendar) return
-              root.host.runCal(["unsubscribe", root.calendar.id])
-              root.close()
+              if (!root.host || !root.calendar || !root.calendar.id) return
+              var id = root.calendar.id
+              root.dismiss()
+              root.host.runCal(["unsubscribe", id])
             }
           }
         }

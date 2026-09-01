@@ -82,6 +82,8 @@ Item {
   property bool addingCalendar: false
   property var detailCalendar: null
   property string statusText: ""
+  property var calQueue: []
+  property string calKind: ""
 
   function refresh() {
     var now = new Date()
@@ -183,8 +185,12 @@ Item {
   }
 
   function runCal(args) {
-    if (root.busy) return
+    if (root.busy) {
+      calQueue.push(args)
+      return
+    }
     root.busy = true
+    root.calKind = args[0] || ""
     root.statusText = ""
     calProc.command = [root.calendarBin].concat(args)
     calProc.running = true
@@ -278,9 +284,14 @@ Item {
       root.busy = false
       if (code === 0) {
         if (root.addingCalendar) root.closeAddForm()
-        else if (!root.statusText) root.statusText = "Synced"
+        else if (root.calKind !== "unsubscribe" && root.calKind !== "rename" && root.calKind !== "color" && root.calKind !== "toggle" && !root.statusText)
+          root.statusText = "Synced"
       }
       eventsFile.reload()
+      if (root.calQueue.length) {
+        var next = root.calQueue.shift()
+        Qt.callLater(function () { root.runCal(next) })
+      }
     }
   }
 

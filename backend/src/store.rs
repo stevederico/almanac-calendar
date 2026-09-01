@@ -31,8 +31,9 @@ pub struct Store {
 pub const LOCAL_ID: &str = "local";
 pub const LOCAL_COLOR: &str = "#c4a574";
 
-const PALETTE: &[&str] = &[
+pub const PALETTE: &[&str] = &[
     "#5b9fd4", "#e07a5f", "#81b29a", "#f2cc8f", "#9b8ec4", "#e9c46a",
+    "#c4a574", "#d67b7b", "#6bb3b3", "#c47ba0",
 ];
 
 impl Default for Store {
@@ -108,7 +109,7 @@ pub fn encode(store: &Store) -> String {
         out.push_str("\",\"dateKey\":\"");
         out.push_str(&escape(&event.date_key));
         out.push_str("\",\"title\":\"");
-        out.push_str(&escape(&event.title));
+        out.push_str(&escape(clip_title(&event.title)));
         out.push_str("\",\"start\":\"");
         out.push_str(&escape(&event.start));
         out.push_str("\",\"end\":\"");
@@ -215,26 +216,31 @@ impl<'a> Parser<'a> {
 
     fn string(&mut self) -> Result<String, String> {
         self.expect(b'"')?;
-        let mut out = String::new();
+        let mut raw = Vec::new();
         while let Some(b) = self.peek() {
             self.i += 1;
             match b {
-                b'"' => return Ok(out),
+                b'"' => {
+                    return String::from_utf8(raw).map_err(|_| "string is not utf-8".into());
+                }
                 b'\\' => match self.peek() {
                     Some(n) => {
                         self.i += 1;
-                        out.push(match n {
-                            b'"' => '"',
-                            b'\\' => '\\',
-                            b'n' => '\n',
-                            b'r' => '\r',
-                            b't' => '\t',
-                            other => other as char,
+                        raw.push(match n {
+                            b'"' => b'"',
+                            b'\\' => b'\\',
+                            b'n' => b'\n',
+                            b'r' => b'\r',
+                            b't' => b'\t',
+                            other => other,
                         });
                     }
                     None => return Err("unterminated escape".into()),
                 },
-                _ => out.push(b as char),
+                _ => raw.push(b),
+            }
+            if raw.len() > 32 * 1024 {
+                return Err("string too long".into());
             }
         }
         Err("unterminated string".into())
@@ -428,6 +434,15 @@ impl<'a> Parser<'a> {
             }
         }
         Err("unterminated container".into())
+    }
+}
+
+fn clip_title(s: &str) -> &str {
+    if s.chars().count() <= 512 {
+        s
+    } else {
+        let end = s.char_indices().map(|(i, _)| i).nth(512).unwrap_or(s.len());
+        &s[..end]
     }
 }
 
