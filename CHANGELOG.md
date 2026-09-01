@@ -4,6 +4,7 @@
   Fetch on toggle
   Queue calendar commands
   Add rename color
+  Align plugin versions
 
 0.1.0
 

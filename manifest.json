@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "sd.calendar",
   "name": "Almanac Calendar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "sd",
   "license": "MIT",
   "description": "Almanac Calendar. Day, week, month, year. Local events plus ICS feeds. Search almanac or calendar.",

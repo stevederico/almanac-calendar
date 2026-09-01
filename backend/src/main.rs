@@ -347,7 +347,7 @@ fn fetch_ics(url: &str) -> Result<String, String> {
             "30",
             "--compressed",
             "-A",
-            "sd-calendar/0.1",
+            "sd-calendar/0.2",
             url,
         ])
         .output()
